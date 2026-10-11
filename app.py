@@ -1,8 +1,11 @@
 """
-SHAAD LIVE FF - ENTERPRISE HIGH-CONCURRENCY BACKEND ENGINE
-ARCHITECTED FOR RAILWAY LINUX CONTAINER & LOCAL HYBRID EXECUTION
-FULL DUAL-ENGINE LIKE INJECTION (OB55 / CHIKUBOT) INTEGRATION WITH PROXY BYPASS
-DATABASE: SQLITE THREAD-SAFE ORM WITH ROTATIONAL AUDIT PROTOCOL
+================================================================================
+SHAAD LIVE FF - HIGH-CONCURRENCY ENTERPRISE API BACKEND SUITE
+================================================================================
+Target Platforms: Linux Containers, Railway.app, Docker, Termux (Android)
+Core Modules: Dual API Like Dispatch, JWT Security, Thread-Safe SQLite Bridge,
+              Real-time UTR Validation, Plan Administration, Analytics Engine
+================================================================================
 """
 
 import os
@@ -22,14 +25,50 @@ from functools import wraps
 from urllib.parse import urlencode, quote_plus
 
 import requests
-from flask import Flask, render_template, request, jsonify, g, session, make_response
+from flask import (
+    Flask,
+    render_template,
+    request,
+    jsonify,
+    g,
+    session,
+    make_response,
+    url_for,
+    redirect
+)
 from flask_cors import CORS
 import jwt
+
+# Internal DAO database abstraction layer
+import database
+from database import (
+    get_admin_key,
+    update_admin_key,
+    get_all_user_keys,
+    create_user_key,
+    update_key_usage,
+    delete_user_key,
+    validate_user_key,
+    log_usage,
+    get_usage_logs,
+    is_ip_banned,
+    ban_ip,
+    init_db,
+    create_session,
+    get_session,
+    delete_session,
+    cleanup_expired_sessions,
+    get_all_plans,
+    get_plan_by_id,
+    create_plan,
+    delete_plan,
+    process_utr_payment
+)
 
 # ==============================================================================
 # SECTION 1: LOGGING TELEMETRY SYSTEM ARCHITECTURE
 # ==============================================================================
-LOG_FORMAT = "%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] ~ %(message)s"
+LOG_FORMAT = "%(asctime)s [%(levelname)s] [PROD_ENGINE:%(lineno)d] ~ %(message)s"
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
@@ -40,13 +79,24 @@ logging.basicConfig(
 logger = logging.getLogger('SHAAD_LIVE_FF_ENGINE')
 
 # ==============================================================================
-# SECTION 2: SYSTEM ENVIRONMENT & CONFIGURATION BINDINGS
+# SECTION 2: APPLICATION BOOTSTRAP & ENVIRONMENT MATRIX
 # ==============================================================================
 app = Flask(__name__, template_folder='templates', static_folder='static')
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
 
-# Core Secrets & JWT Lifespans
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'SHAAD_LIVE_FF_SUPER_PROD_MASTER_KEY_2026_SECURE_TOKEN_XYZ')
+# GUNICORN / RAILWAY STARTUP AUTO-INIT FIX
+# Worker start hote hi schema tables bina fail hue check aur initialize karega
+try:
+    init_db()
+    logger.info("Railway Boot Check: Database schema initialized successfully.")
+except Exception as e:
+    logger.error(f"Startup DB Init Warning: {e}")
+
+# Application Security Keys & Timing Constants
+app.config['SECRET_KEY'] = os.environ.get(
+    'SECRET_KEY',
+    'SHAAD_LIVE_FF_SUPER_PROD_MASTER_KEY_2026_SECURE_TOKEN_XYZ_89712398471923'
+)
 app.config['JWT_EXPIRATION_HOURS'] = int(os.environ.get('JWT_EXPIRATION_HOURS', 12))
 app.config['MAX_FAILED_ATTEMPTS'] = 5
 app.config['FAILED_ATTEMPT_WINDOW_MINUTES'] = 15
@@ -57,339 +107,50 @@ MAINTENANCE_MODE = False
 SYSTEM_START_TIME = datetime.utcnow()
 
 # ==============================================================================
-# SECTION 3: DOWNSTREAM API CLUSTERS & PAYMENT GATEWAYS
+# SECTION 3: DOWNSTREAM API CLUSTERS & PAYMENT CONFIGURATIONS
 # ==============================================================================
-# Production Endpoints for Likes Dispatch Engine
+# Dual Engine Microservices (Key: ZEXXY)
 API_URL_20 = os.environ.get("API_URL_20", "https://shaadviplikeob55.vercel.app/like")
 API_URL_50 = os.environ.get("API_URL_50", "https://chikubot-sable.vercel.app/like")
 BASE_API_URL = os.environ.get("BASE_API_URL", "https://chikubot-sable.vercel.app")
 API_KEY = os.environ.get("API_KEY", "ZEXXY")
 
-# Financial Settlement Gateways
+# Gateway & Master Security Credentials
 YOUR_UPI_ID = os.environ.get("UPI_GATEWAY_ID", "shaadrana249@oksbi")
 ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "Shaadlive07")
 
-# Memory Cache for Security Boundaries
+# Global Memory Caches for Security Interceptors
 FAILED_LOGINS = {}
 RATE_LIMIT_CACHE = {}
-ACTIVE_MEMORY_SESSIONS = {}
+REQUEST_AUDIT_LOG = []
 
 # ==============================================================================
-# SECTION 4: THREAD-SAFE SQLITE DATABASE BRIDGE INTERFACE
+# SECTION 4: THREAD-SAFE SQLITE PER-REQUEST CONTEXT BRIDGE
 # ==============================================================================
 DATABASE_FILE = os.environ.get("DB_PATH", "shaad_live_ff.db")
 
-def get_db():
-    """Establish and return isolated SQLite context connection."""
+def get_request_db():
+    """Establish and return isolated SQLite context connection for this request."""
     db = getattr(g, '_database', None)
     if db is None:
-        db = g._database = sqlite3.connect(DATABASE_FILE, timeout=20.0)
+        db = g._database = sqlite3.connect(DATABASE_FILE, timeout=30.0)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode = WAL;")
+        db.execute("PRAGMA synchronous = NORMAL;")
     return db
 
 @app.teardown_appcontext
-def close_connection(exception):
+def teardown_db_connection(exception):
     """Safely terminate database connection on request teardown."""
     db = getattr(g, '_database', None)
     if db is not None:
         db.close()
 
-def init_db():
-    """Initialize complete relational database schema."""
-    conn = sqlite3.connect(DATABASE_FILE)
-    cursor = conn.cursor()
-
-    # 1. User Keys / Licenses Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_name TEXT UNIQUE NOT NULL,
-            validity_days INTEGER DEFAULT 30,
-            use_limit INTEGER DEFAULT 1,
-            used_count INTEGER DEFAULT 0,
-            created_by TEXT DEFAULT 'system',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active INTEGER DEFAULT 1
-        )
-    ''')
-
-    # 2. Master Admin Credentials
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS admin_meta (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            master_key TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 3. Dynamic Commercial Plans Table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS commercial_plans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            likes_count INTEGER NOT NULL,
-            price REAL NOT NULL,
-            validity_days INTEGER DEFAULT 30,
-            boost_limit INTEGER DEFAULT 1,
-            description TEXT DEFAULT '',
-            is_active INTEGER DEFAULT 1
-        )
-    ''')
-
-    # 4. Verified Payment UTR Ledger
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            utr_number TEXT UNIQUE NOT NULL,
-            plan_id INTEGER,
-            amount REAL,
-            generated_key TEXT,
-            status TEXT DEFAULT 'APPROVED',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 5. Session State Store
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            session_id TEXT PRIMARY KEY,
-            user_key TEXT NOT NULL,
-            user_type TEXT NOT NULL,
-            ip_address TEXT,
-            expires_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 6. Granular Operation Logs
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS usage_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_key TEXT NOT NULL,
-            action TEXT NOT NULL,
-            target_uid TEXT,
-            target_region TEXT,
-            status TEXT NOT NULL,
-            client_ip TEXT,
-            user_agent TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 7. Banned Blacklist Registry
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS banned_ips (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ip_address TEXT UNIQUE NOT NULL,
-            reason TEXT,
-            banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # Seed Admin Key if missing
-    cursor.execute('SELECT COUNT(*) FROM admin_meta')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO admin_meta (master_key) VALUES (?)', (ADMIN_MASTER_KEY,))
-
-    # Seed Default Plans if missing
-    cursor.execute('SELECT COUNT(*) FROM commercial_plans')
-    if cursor.fetchone()[0] == 0:
-        default_plans = [
-            ("20 Likes Starter", 20, 10.0, 30, 1, "Instant Delivery, 100% Safe (OB55 Server)"),
-            ("50 Likes Pro", 50, 25.0, 30, 1, "Fast Auto Delivery, Chikubot Engine"),
-            ("100 Likes Ultimate", 100, 49.0, 30, 1, "Ultra Fast Boost, Priority Server"),
-            ("200 Likes Mega Pack", 200, 95.0, 30, 1, "Admin Supervised Delivery, Dedicated Node"),
-            ("500 Likes Ultra Pack", 500, 230.0, 30, 1, "Max Speed Boost, Guaranteed Delivery"),
-            ("1000 Likes VIP Legend", 1000, 450.0, 30, 1, "VIP Dedicated Node, Rank Boost")
-        ]
-        cursor.executemany('''
-            INSERT INTO commercial_plans (name, likes_count, price, validity_days, boost_limit, description)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', default_plans)
-
-    conn.commit()
-    conn.close()
-    logger.info("Database schemas verified and initialized successfully.")
-
 # ==============================================================================
-# SECTION 5: DATA ACCESS OBJECT (DAO) CORE FUNCTIONS
-# ==============================================================================
-def get_admin_key():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT master_key FROM admin_meta ORDER BY id DESC LIMIT 1')
-    row = cur.fetchone()
-    return row['master_key'] if row else ADMIN_MASTER_KEY
-
-def update_admin_key(old_key, new_key):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT master_key FROM admin_meta ORDER BY id DESC LIMIT 1')
-    row = cur.fetchone()
-    if row and row['master_key'] == old_key:
-        cur.execute('UPDATE admin_meta SET master_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', (new_key, row['id']))
-        conn.commit()
-        return True
-    return False
-
-def get_all_plans():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM commercial_plans WHERE is_active = 1 ORDER BY price ASC')
-    return [dict(row) for row in cur.fetchall()]
-
-def get_plan_by_id(plan_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM commercial_plans WHERE id = ?', (plan_id,))
-    row = cur.fetchone()
-    return dict(row) if row else None
-
-def create_plan(name, likes, price, days, limit, desc=""):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO commercial_plans (name, likes_count, price, validity_days, boost_limit, description)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (name, likes, price, days, limit, desc))
-    conn.commit()
-    return cur.lastrowid
-
-def delete_plan(plan_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('UPDATE commercial_plans SET is_active = 0 WHERE id = ?', (plan_id,))
-    conn.commit()
-    return cur.rowcount > 0
-
-def get_all_user_keys():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM user_keys ORDER BY created_at DESC')
-    return [dict(row) for row in cur.fetchall()]
-
-def create_user_key(key, validity_days=30, use_limit=1, created_by='system'):
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute('''
-            INSERT INTO user_keys (key_name, validity_days, use_limit, created_by)
-            VALUES (?, ?, ?, ?)
-        ''', (key, validity_days, use_limit, created_by))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
-
-def validate_user_key(key):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM user_keys WHERE key_name = ? AND is_active = 1', (key,))
-    row = cur.fetchone()
-    if not row:
-        return None, "Key not found or deactivated"
-    
-    key_dict = dict(row)
-    if key_dict['used_count'] >= key_dict['use_limit']:
-        return None, "License usage quota exhausted"
-        
-    return key_dict, None
-
-def update_key_usage(key, action="like"):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('UPDATE user_keys SET used_count = used_count + 1 WHERE key_name = ?', (key,))
-    conn.commit()
-
-def delete_user_key(key):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM user_keys WHERE key_name = ?', (key,))
-    conn.commit()
-    return cur.rowcount > 0
-
-def log_usage(key, action, uid, region, status, ip, ua):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT INTO usage_logs (user_key, action, target_uid, target_region, status, client_ip, user_agent)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (key, action, uid, region, status, ip, ua))
-    conn.commit()
-
-def get_usage_logs(limit=100):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM usage_logs ORDER BY created_at DESC LIMIT ?', (limit,))
-    return [dict(row) for row in cur.fetchall()]
-
-def is_ip_banned(ip):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT 1 FROM banned_ips WHERE ip_address = ?', (ip,))
-    return cur.fetchone() is not None
-
-def ban_ip(ip, reason="Automated Security Boundary Breach"):
-    conn = get_db()
-    cur = conn.cursor()
-    try:
-        cur.execute('INSERT INTO banned_ips (ip_address, reason) VALUES (?, ?)', (ip, reason))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
-
-def process_utr_payment(utr, plan_id, generated_key):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM payments WHERE utr_number = ?', (utr,))
-    existing = cur.fetchone()
-    if existing:
-        return False, "This UTR reference has already been credited or claimed.", None
-        
-    plan = get_plan_by_id(plan_id)
-    if not plan:
-        return False, "Invalid target plan configuration.", None
-        
-    cur.execute('''
-        INSERT INTO payments (utr_number, plan_id, amount, generated_key, status)
-        VALUES (?, ?, ?, ?, 'APPROVED')
-    ''', (utr, plan_id, plan['price'], generated_key))
-    conn.commit()
-    return True, "Payment verified successfully.", generated_key
-
-def create_session(session_id, user_key, user_type, ip_address, expires_at):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT OR REPLACE INTO user_sessions (session_id, user_key, user_type, ip_address, expires_at)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (session_id, user_key, user_type, ip_address, expires_at))
-    conn.commit()
-
-def get_session(session_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM user_sessions WHERE session_id = ?', (session_id,))
-    row = cur.fetchone()
-    return dict(row) if row else None
-
-def delete_session(session_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM user_sessions WHERE session_id = ?', (session_id,))
-    conn.commit()
-
-def cleanup_expired_sessions():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM user_sessions WHERE expires_at < CURRENT_TIMESTAMP')
-    conn.commit()
-
-# ==============================================================================
-# SECTION 6: NETWORK UTILITIES & SANITIZATION HELPERS
+# SECTION 5: NETWORK UTILITIES & SANITIZATION HELPERS
 # ==============================================================================
 def get_client_ip():
-    """Extract authoritative remote client IP across reverse proxies."""
+    """Extract authoritative remote client IP across reverse proxies and load balancers."""
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
         return forwarded.split(',')[0].strip()
@@ -399,7 +160,7 @@ def get_client_ip():
     return request.remote_addr or '127.0.0.1'
 
 def generate_random_key(prefix="SLFF"):
-    """Generate cryptographically strong license string."""
+    """Generate cryptographically strong license string excluding ambiguous chars."""
     alphabet = string.ascii_uppercase + string.digits
     for banned in ('O', '0', 'I', '1'):
         alphabet = alphabet.replace(banned, '')
@@ -409,7 +170,7 @@ def generate_random_key(prefix="SLFF"):
     return f"{prefix}-{seg1}-{seg2}-{seg3}"
 
 def validate_freefire_uid(uid):
-    """Enforce numeric bounds standard for Free Fire account UIDs."""
+    """Enforce numeric bounds standard for Free Fire account UIDs (8 to 12 digits)."""
     if not uid:
         return False
     u = str(uid).strip()
@@ -422,8 +183,8 @@ def validate_utr_format(utr):
     c = str(utr).strip()
     return c.isdigit() and len(c) == 12
 
-def check_ip_rate_limit(ip, max_requests=100, window_seconds=60):
-    """Memory sliding window rate limiting."""
+def check_ip_rate_limit(ip, max_requests=120, window_seconds=60):
+    """In-memory sliding window rate limiting."""
     now = datetime.utcnow()
     records = RATE_LIMIT_CACHE.get(ip, [])
     cutoff = now - timedelta(seconds=window_seconds)
@@ -438,6 +199,7 @@ def check_ip_rate_limit(ip, max_requests=100, window_seconds=60):
     return True
 
 def record_failed_login(ip):
+    """Track failed login attempts per IP and trigger auto-ban when limit is exceeded."""
     now = datetime.utcnow()
     records = FAILED_LOGINS.get(ip, [])
     cutoff = now - timedelta(minutes=app.config['FAILED_ATTEMPT_WINDOW_MINUTES'])
@@ -451,12 +213,14 @@ def record_failed_login(ip):
         FAILED_LOGINS.pop(ip, None)
 
 def clear_failed_logins(ip):
+    """Clear failed login records upon successful authentication."""
     FAILED_LOGINS.pop(ip, None)
 
 # ==============================================================================
-# SECTION 7: JWT TOKEN LIFECYCLE & MIDDLEWARE GUARDS
+# SECTION 6: JWT TOKEN LIFECYCLE & MIDDLEWARE GUARDS
 # ==============================================================================
 def generate_jwt_token(user_key, user_type, key_data=None):
+    """Create and sign a cryptographically secure JWT authentication token."""
     session_uuid = str(uuid.uuid4())
     expiration = datetime.utcnow() + timedelta(hours=app.config['JWT_EXPIRATION_HOURS'])
     payload = {
@@ -478,6 +242,7 @@ def generate_jwt_token(user_key, user_type, key_data=None):
     return token
 
 def verify_jwt_token(token):
+    """Decode, verify signature and check persistence validity for JWT token."""
     try:
         payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
         session_data = get_session(payload['session_id'])
@@ -492,6 +257,7 @@ def verify_jwt_token(token):
         return None, f"Token decode error: {str(e)}"
 
 def token_required(f):
+    """Decorator ensuring that incoming requests have valid JWT authentication."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if MAINTENANCE_MODE:
@@ -517,6 +283,7 @@ def token_required(f):
     return decorated
 
 def admin_required(f):
+    """Decorator restricting route execution strictly to authenticated Administrators."""
     @wraps(f)
     def decorated(*args, **kwargs):
         client_ip = get_client_ip()
@@ -542,41 +309,59 @@ def admin_required(f):
     return decorated
 
 # ==============================================================================
-# SECTION 8: GLOBAL SECURITY INTERCEPTORS
+# SECTION 7: GLOBAL SECURITY BOUNDARY INTERCEPTORS
 # ==============================================================================
 @app.before_request
 def enforce_security_boundary():
+    """Run security assertions on all incoming HTTP requests prior to view execution."""
     client_ip = get_client_ip()
     
+    # 1. IP Ban Enforcement
     if is_ip_banned(client_ip):
-        return jsonify({'success': False, 'message': 'Your IP address has been blacklisted.'}), 403
+        return jsonify({
+            'success': False,
+            'message': 'Your IP address has been restricted from interacting with this service.'
+        }), 403
         
+    # 2. Rate Limiting Protection
     if request.path.startswith('/api/') or request.path.startswith('/send_likes_api'):
-        if not check_ip_rate_limit(client_ip, max_requests=120, window_seconds=60):
-            return jsonify({'success': False, 'message': 'High rate of requests detected. Please wait.'}), 429
+        if not check_ip_rate_limit(client_ip, max_requests=150, window_seconds=60):
+            return jsonify({
+                'success': False,
+                'message': 'Rate limit threshold exceeded. Please slow down.'
+            }), 429
             
+    # 3. Occasional garbage collection of expired session entries
     if random.random() < 0.05:
         cleanup_expired_sessions()
 
 # ==============================================================================
-# SECTION 9: PUBLIC CLIENT & FRONTEND ROUTING
+# SECTION 8: PUBLIC CLIENT & FRONTEND ROUTING
 # ==============================================================================
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
+    """Render the primary HTML single-page application."""
     return render_template('index.html')
 
 @app.route('/api/health', methods=['GET'])
 def system_health():
+    """Deliver real-time cluster health and process telemetry."""
     uptime = datetime.utcnow() - SYSTEM_START_TIME
     return jsonify({
         'status': 'healthy',
         'server_time': datetime.utcnow().isoformat(),
         'uptime_seconds': int(uptime.total_seconds()),
-        'maintenance': MAINTENANCE_MODE
+        'maintenance': MAINTENANCE_MODE,
+        'environment': os.environ.get('RAILWAY_ENVIRONMENT', 'production'),
+        'api_cluster': {
+            '20_engine': API_URL_20,
+            '50_engine': API_URL_50
+        }
     })
 
 @app.route('/api/plans', methods=['GET'])
 def get_commercial_plans():
+    """Publicly retrieve list of available likes packages and payment parameters."""
     plans = get_all_plans()
     return jsonify({
         'success': True,
@@ -585,19 +370,29 @@ def get_commercial_plans():
     })
 
 # ==============================================================================
-# SECTION 10: REAL FREE FIRE DUAL ENGINE DISPATCH ROUTE (20 & 50 LIKES)
+# SECTION 9: DUAL ENGINE FREE FIRE LIKE DISPATCH ENGINE (20 & 50 LIKES)
 # ==============================================================================
 @app.route('/send_likes_api', methods=['POST'])
 def send_likes_api():
-    """Execute live like injection and accurately parse player data."""
+    """
+    Main dispatch endpoint for Free Fire Likes injection.
+    Automatically routes to:
+      - 20 Likes: https://shaadviplikeob55.vercel.app/like
+      - 50 Likes: https://chikubot-sable.vercel.app/like
+    Extracts real game nickname, before likes, likes added, and final likes.
+    """
     payload = request.get_json() or {}
     uid = payload.get('uid', '').strip()
     region = payload.get('region', 'ind').strip().lower()
     likes_target = int(payload.get('likes', 20))
 
     if not validate_freefire_uid(uid):
-        return jsonify({'success': False, 'message': 'Invalid Free Fire Player UID.'}), 400
+        return jsonify({
+            'success': False,
+            'message': 'Invalid Free Fire Player UID format. Must be 8-12 digits.'
+        }), 400
 
+    # Route based on selected package size
     target_api_url = API_URL_20 if likes_target == 20 else API_URL_50
 
     params = {
@@ -607,23 +402,31 @@ def send_likes_api():
     }
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 12; Mobile) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        )
     }
 
-    logger.info(f"Dispatching [{likes_target} Likes] -> URL: {target_api_url} | UID: {uid} | Region: {region}")
+    logger.info(
+        f"Executing Likes Dispatch -> [Target: {likes_target} Likes] "
+        f"| Endpoint: {target_api_url} | UID: {uid} | Region: {region}"
+    )
 
     real_player_name = "亗 S H A A D 亗"
     prev_likes = 0
     delivered_likes = 0
     final_likes = 0
+    api_success_flag = False
 
     try:
-        response = requests.get(target_api_url, params=params, headers=headers, timeout=35)
-        logger.info(f"API Returned HTTP Status: {response.status_code}")
+        response = requests.get(target_api_url, params=params, headers=headers, timeout=40)
+        logger.info(f"Like API HTTP Status: {response.status_code}")
 
         if response.status_code == 200:
             data = response.json()
-            logger.info(f"Raw Output Received: {data}")
+            logger.info(f"API Returned Exact Response: {data}")
+            api_success_flag = True
 
             # 1. Nickname from PlayerNickname
             if data.get("PlayerNickname"):
@@ -633,30 +436,46 @@ def send_likes_api():
             if data.get("LikesbeforeCommand") is not None:
                 try:
                     prev_likes = int(data.get("LikesbeforeCommand"))
-                except:
+                except (ValueError, TypeError):
                     prev_likes = 0
 
             # 3. Delivered Likes from LikesGivenByAPI
             if data.get("LikesGivenByAPI") is not None:
                 try:
                     delivered_likes = int(data.get("LikesGivenByAPI"))
-                except:
+                except (ValueError, TypeError):
                     delivered_likes = 0
 
             # 4. Final Likes from LikesafterCommand
             if data.get("LikesafterCommand") is not None:
                 try:
                     final_likes = int(data.get("LikesafterCommand"))
-                except:
+                except (ValueError, TypeError):
                     final_likes = prev_likes + delivered_likes
             else:
                 final_likes = prev_likes + delivered_likes
+
         else:
+            logger.warning(f"Upstream API failed with status: {response.status_code}")
             final_likes = prev_likes + delivered_likes
 
-    except Exception as e:
-        logger.error(f"Downstream Like Engine Exception: {str(e)}")
+    except requests.exceptions.Timeout:
+        logger.error(f"Downstream Like API timed out for UID: {uid}")
         final_likes = prev_likes + delivered_likes
+    except Exception as e:
+        logger.error(f"Exception during Like API invocation: {str(e)}")
+        final_likes = prev_likes + delivered_likes
+
+    # Log telemetry for administrative visibility
+    log_usage(
+        key="WEB_PORTAL",
+        action=f"BOOST_{likes_target}",
+        uid=uid,
+        region=region,
+        status="SUCCESS" if api_success_flag else "FAILED",
+        ip=get_client_ip(),
+        ua=request.headers.get("User-Agent", "WebBrowser")
+    )
 
     return jsonify({
         'success': True,
@@ -667,10 +486,11 @@ def send_likes_api():
     })
 
 # ==============================================================================
-# SECTION 11: PAYMENT VERIFICATION & ACCOUNT AUTHENTICATION
+# SECTION 10: PAYMENT VERIFICATION & ACCOUNT AUTHENTICATION
 # ==============================================================================
 @app.route('/api/verify-payment', methods=['POST'])
 def verify_payment_endpoint():
+    """Verify submitted payment UTR against configured plans and credit ledger."""
     data = request.json or {}
     utr = data.get('utr', '').strip()
     plan_id = data.get('plan_id')
@@ -678,12 +498,15 @@ def verify_payment_endpoint():
     if not validate_utr_format(utr):
         return jsonify({
             'success': False,
-            'message': 'Invalid UTR reference format. Must be an exact 12-digit number.'
+            'message': 'Invalid UTR format. Must be an exact 12-digit numeric reference.'
         }), 400
         
     plan = get_plan_by_id(plan_id)
     if not plan:
-        return jsonify({'success': False, 'message': 'Target plan configuration not found.'}), 404
+        return jsonify({
+            'success': False,
+            'message': 'Target plan configuration not found.'
+        }), 404
         
     temp_key = generate_random_key()
     success, message, final_key = process_utr_payment(utr, plan_id, temp_key)
@@ -707,8 +530,38 @@ def verify_payment_endpoint():
         'likes_count': plan['likes_count']
     })
 
+@app.route('/api/find-key', methods=['POST'])
+def find_key_endpoint():
+    """Allow customers to recover their generated license key using their payment UTR."""
+    data = request.json or {}
+    utr = data.get('utr', '').strip()
+    
+    if not validate_utr_format(utr):
+        return jsonify({'success': False, 'message': 'Please enter a valid 12-digit UTR.'}), 400
+        
+    conn = database.get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT generated_key FROM payments WHERE utr_number = ?', (utr,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row and row['generated_key']:
+        key_data, error = validate_user_key(row['generated_key'])
+        if error:
+            return jsonify({
+                'success': False,
+                'message': f"Key found ({row['generated_key']}), but status: {error}"
+            })
+        return jsonify({'success': True, 'key': row['generated_key']})
+        
+    return jsonify({
+        'success': False,
+        'message': 'No license key associated with this UTR number.'
+    }), 404
+
 @app.route('/api/login', methods=['POST'])
 def login_endpoint():
+    """Authenticate both users with license keys and admins with master security keys."""
     data = request.json or {}
     key = data.get('key', '').strip()
     client_ip = get_client_ip()
@@ -737,6 +590,7 @@ def login_endpoint():
 
 @app.route('/api/verify-token', methods=['POST'])
 def verify_token_endpoint():
+    """Verify client JWT token validity upon page reloads."""
     data = request.json or {}
     token = data.get('token')
     if not token:
@@ -753,17 +607,19 @@ def verify_token_endpoint():
     })
 
 # ==============================================================================
-# SECTION 12: ADMINISTRATIVE REST ENDPOINTS
+# SECTION 11: ADMINISTRATIVE REST APIS & MANAGEMENT
 # ==============================================================================
 @app.route('/api/admin/keys', methods=['GET'])
 @admin_required
 def get_keys_endpoint():
+    """Retrieve all issued customer licenses."""
     keys = get_all_user_keys()
     return jsonify({'success': True, 'keys': keys})
 
 @app.route('/api/admin/create-key', methods=['POST'])
 @admin_required
 def admin_manual_create_key_endpoint():
+    """Manually issue keys directly from the administrator workspace."""
     data = request.json or {}
     custom_key = data.get('custom_key', '').strip()
     validity_days = int(data.get('validity_days', 30))
@@ -779,6 +635,7 @@ def admin_manual_create_key_endpoint():
 @app.route('/api/admin/delete-key', methods=['POST'])
 @admin_required
 def del_key_endpoint():
+    """Revoke and delete a customer license."""
     key = request.json.get('key')
     if not key:
         return jsonify({'success': False, 'message': 'Key parameter missing.'}), 400
@@ -787,6 +644,7 @@ def del_key_endpoint():
 @app.route('/api/admin/create-plan', methods=['POST'])
 @admin_required
 def add_plan_endpoint():
+    """Add a new commercial package to the store catalog."""
     d = request.json or {}
     name = d.get('name', '').strip()
     likes = int(d.get('likes_count', 50))
@@ -804,12 +662,14 @@ def add_plan_endpoint():
 @app.route('/api/admin/delete-plan', methods=['POST'])
 @admin_required
 def del_plan_endpoint():
+    """Remove a commercial plan from active store listings."""
     plan_id = request.json.get('plan_id')
     return jsonify({'success': delete_plan(plan_id)})
 
 @app.route('/api/admin/update-admin-key', methods=['POST'])
 @admin_required
 def upd_admin_key_endpoint():
+    """Rotate the master administrative authorization key."""
     d = request.json or {}
     old_k = d.get('old_key')
     new_k = d.get('new_key')
@@ -823,13 +683,15 @@ def upd_admin_key_endpoint():
 @app.route('/api/admin/logs', methods=['GET'])
 @admin_required
 def fetch_system_logs_endpoint():
+    """Fetch recent activity logs."""
     logs = get_usage_logs(limit=150)
     return jsonify({'success': True, 'logs': logs})
 
 @app.route('/api/admin/system-stats', methods=['GET'])
 @admin_required
 def admin_stats_endpoint():
-    conn = get_db()
+    """Compute financial earnings and order metrics."""
+    conn = database.get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT COUNT(*) FROM user_keys')
     total_keys = cursor.fetchone()[0]
@@ -839,6 +701,7 @@ def admin_stats_endpoint():
     total_revenue = cursor.fetchone()[0] or 0
     cursor.execute('SELECT COUNT(*) FROM usage_logs WHERE status = "SUCCESS"')
     total_boosts = cursor.fetchone()[0]
+    conn.close()
     
     return jsonify({
         'success': True,
@@ -853,15 +716,15 @@ def admin_stats_endpoint():
 @app.route('/api/admin/toggle-maintenance', methods=['POST'])
 @admin_required
 def toggle_maintenance_endpoint():
+    """Toggle maintenance mode globally."""
     global MAINTENANCE_MODE
     MAINTENANCE_MODE = not MAINTENANCE_MODE
     return jsonify({'success': True, 'maintenance': MAINTENANCE_MODE})
 
 # ==============================================================================
-# SECTION 13: SERVER RUNTIME ENTRYPOINT (RAILWAY & DOCKER READY)
+# SECTION 12: APPLICATION RUNTIME ENTRYPOINT (LOCAL & RAILWAY COMPLIANT)
 # ==============================================================================
 if __name__ == '__main__':
-    init_db()
     port = int(os.environ.get('PORT', 5000))
     logger.info("Initializing SHAAD LIVE FF Production Environment...")
     logger.info(f"Payment Gateway Bound to: {YOUR_UPI_ID}")
