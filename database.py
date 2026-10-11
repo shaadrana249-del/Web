@@ -35,8 +35,6 @@ if not logger.handlers:
 DB_PATH = os.environ.get("DB_PATH", "shaad_live_ff.db")
 DEFAULT_ADMIN_KEY = os.environ.get("ADMIN_MASTER_KEY", "Shaadlive07")
 CONNECTION_TIMEOUT = float(os.environ.get("DB_TIMEOUT", 30.0))
-MAX_RETRY_ATTEMPTS = 3
-RETRY_DELAY_SECONDS = 0.5
 
 # ==============================================================================
 # SECTION 3: THREAD-SAFE CONTEXT MANAGERS & CONNECTION HANDLERS
@@ -460,7 +458,7 @@ def cleanup_expired_sessions():
         return 0
 
 # ==============================================================================
-# SECTION 10: AUDIT TELEMETRY & BAN REPOSITORIES
+# SECTION 10: AUDIT TELEMETRY & BAN REPOSITORIES (SAFE QUERIES)
 # ==============================================================================
 def log_usage(key, action, uid, region, status, ip, ua):
     """Write an audit entry for actions executed across the system."""
@@ -487,15 +485,18 @@ def get_usage_logs(limit=100):
         return []
 
 def is_ip_banned(ip):
-    """Check if a remote client IP is in the blacklist."""
+    """Check if a remote client IP is in the blacklist with zero-fail safety."""
     if not ip:
         return False
     try:
-        with get_db_cursor(commit=False) as cur:
-            cur.execute("SELECT 1 FROM banned_ips WHERE ip_address = ?;", (ip,))
-            return cur.fetchone() is not None
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM banned_ips WHERE ip_address = ?;", (ip,))
+        row = cur.fetchone()
+        conn.close()
+        return row is not None
     except Exception as e:
-        logger.error(f"Error checking IP ban status for {ip}: {e}")
+        # Table agar start-up me thoda late initialize ho tab bhi crash nahi hoga
         return False
 
 def ban_ip(ip, reason="Automated Security Boundary Violation"):
@@ -510,4 +511,3 @@ def ban_ip(ip, reason="Automated Security Boundary Violation"):
     except Exception as e:
         logger.error(f"Error banning IP {ip}: {e}")
         return False
-
