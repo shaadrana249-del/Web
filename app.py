@@ -85,7 +85,6 @@ app = Flask(__name__, template_folder='templates', static_folder='static')
 CORS(app, supports_credentials=True, resources={r"/*": {"origins": "*"}})
 
 # GUNICORN / RAILWAY STARTUP AUTO-INIT FIX
-# Worker start hote hi schema tables bina fail hue check aur initialize karega
 try:
     init_db()
     logger.info("Railway Boot Check: Database schema initialized successfully.")
@@ -109,17 +108,14 @@ SYSTEM_START_TIME = datetime.utcnow()
 # ==============================================================================
 # SECTION 3: DOWNSTREAM API CLUSTERS & PAYMENT CONFIGURATIONS
 # ==============================================================================
-# Dual Engine Microservices (Key: ZEXXY)
 API_URL_20 = os.environ.get("API_URL_20", "https://shaadviplikeob55.vercel.app/like")
 API_URL_50 = os.environ.get("API_URL_50", "https://chikubot-sable.vercel.app/like")
 BASE_API_URL = os.environ.get("BASE_API_URL", "https://chikubot-sable.vercel.app")
 API_KEY = os.environ.get("API_KEY", "ZEXXY")
 
-# Gateway & Master Security Credentials
 YOUR_UPI_ID = os.environ.get("UPI_GATEWAY_ID", "shaadrana249@oksbi")
 ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "Shaadlive07")
 
-# Global Memory Caches for Security Interceptors
 FAILED_LOGINS = {}
 RATE_LIMIT_CACHE = {}
 
@@ -149,7 +145,7 @@ def teardown_db_connection(exception):
 # SECTION 5: NETWORK UTILITIES & SANITIZATION HELPERS
 # ==============================================================================
 def get_client_ip():
-    """Extract authoritative remote client IP across reverse proxies and load balancers."""
+    """Extract authoritative remote client IP across reverse proxies."""
     forwarded = request.headers.get('X-Forwarded-For')
     if forwarded:
         return forwarded.split(',')[0].strip()
@@ -308,41 +304,43 @@ def admin_required(f):
     return decorated
 
 # ==============================================================================
-# SECTION 7: GLOBAL SECURITY BOUNDARY INTERCEPTORS
+# SECTION 7: FAIL-SAFE GLOBAL SECURITY INTERCEPTOR
 # ==============================================================================
 @app.before_request
 def enforce_security_boundary():
-    """Run security assertions on all incoming HTTP requests prior to view execution."""
-    client_ip = get_client_ip()
-    
-    # 1. IP Ban Enforcement
-    if is_ip_banned(client_ip):
-        return jsonify({
-            'success': False,
-            'message': 'Your IP address has been restricted from interacting with this service.'
-        }), 403
+    """
+    Fail-safe request boundary interceptor.
+    Catches any unexpected database issue safely so landing pages never throw a 500 crash.
+    """
+    try:
+        client_ip = get_client_ip()
         
-    # 2. Rate Limiting Protection
-    if request.path.startswith('/api/') or request.path.startswith('/send_likes_api'):
-        if not check_ip_rate_limit(client_ip, max_requests=150, window_seconds=60):
+        # IP ban check with internal auto-table recovery
+        if is_ip_banned(client_ip):
             return jsonify({
                 'success': False,
-                'message': 'Rate limit threshold exceeded. Please slow down.'
-            }), 429
+                'message': 'Your IP address has been restricted from interacting with this service.'
+            }), 403
             
-    # 3. Occasional garbage collection of expired session entries
-    if random.random() < 0.05:
-        cleanup_expired_sessions()
+        if request.path.startswith('/api/') or request.path.startswith('/send_likes_api'):
+            if not check_ip_rate_limit(client_ip, max_requests=150, window_seconds=60):
+                return jsonify({
+                    'success': False,
+                    'message': 'Rate limit threshold exceeded. Please slow down.'
+                }), 429
+                
+        if random.random() < 0.05:
+            cleanup_expired_sessions()
+    except Exception as boundary_err:
+        logger.warning(f"Security boundary warning (bypassed safely): {boundary_err}")
 
 # ==============================================================================
-# SECTION 8: BULLETPROOF FRONTEND TEMPLATE ROUTING (PREVENTS 500 CRASH)
+# SECTION 8: BULLETPROOF FRONTEND TEMPLATE ROUTING
 # ==============================================================================
 @app.route('/', methods=['GET'])
 def index():
     """
-    Directly streams index.html into the response context.
-    Bypasses Jinja2 parsing entirely to prevent crashes from JavaScript template literals (${...}).
-    Checks all standard Railway / Linux container filesystem paths.
+    Streams index.html safely to avoid Jinja2 parsing crashes.
     """
     candidate_paths = [
         os.path.join(app.root_path, 'templates', 'index.html'),
@@ -363,7 +361,6 @@ def index():
             except Exception as read_err:
                 logger.error(f"Failed to read file from candidate path {p}: {read_err}")
 
-    # Fallback to standard render if file reading encountered issues
     try:
         return render_template('index.html')
     except Exception as render_err:
