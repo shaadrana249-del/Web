@@ -122,7 +122,6 @@ ADMIN_MASTER_KEY = os.environ.get("ADMIN_MASTER_KEY", "Shaadlive07")
 # Global Memory Caches for Security Interceptors
 FAILED_LOGINS = {}
 RATE_LIMIT_CACHE = {}
-REQUEST_AUDIT_LOG = []
 
 # ==============================================================================
 # SECTION 4: THREAD-SAFE SQLITE PER-REQUEST CONTEXT BRIDGE
@@ -183,7 +182,7 @@ def validate_utr_format(utr):
     c = str(utr).strip()
     return c.isdigit() and len(c) == 12
 
-def check_ip_rate_limit(ip, max_requests=120, window_seconds=60):
+def check_ip_rate_limit(ip, max_requests=150, window_seconds=60):
     """In-memory sliding window rate limiting."""
     now = datetime.utcnow()
     records = RATE_LIMIT_CACHE.get(ip, [])
@@ -336,12 +335,40 @@ def enforce_security_boundary():
         cleanup_expired_sessions()
 
 # ==============================================================================
-# SECTION 8: PUBLIC CLIENT & FRONTEND ROUTING
+# SECTION 8: BULLETPROOF FRONTEND TEMPLATE ROUTING (PREVENTS 500 CRASH)
 # ==============================================================================
 @app.route('/', methods=['GET'])
 def index():
-    """Render the primary HTML single-page application."""
-    return render_template('index.html')
+    """
+    Directly streams index.html into the response context.
+    Bypasses Jinja2 parsing entirely to prevent crashes from JavaScript template literals (${...}).
+    Checks all standard Railway / Linux container filesystem paths.
+    """
+    candidate_paths = [
+        os.path.join(app.root_path, 'templates', 'index.html'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'index.html'),
+        os.path.join(os.getcwd(), 'templates', 'index.html'),
+        os.path.join(app.root_path, 'index.html'),
+        os.path.join(os.getcwd(), 'index.html'),
+        'templates/index.html',
+        'index.html'
+    ]
+
+    for p in candidate_paths:
+        if os.path.exists(p) and os.path.isfile(p):
+            try:
+                with open(p, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+                return html_content, 200, {'Content-Type': 'text/html; charset=utf-8'}
+            except Exception as read_err:
+                logger.error(f"Failed to read file from candidate path {p}: {read_err}")
+
+    # Fallback to standard render if file reading encountered issues
+    try:
+        return render_template('index.html')
+    except Exception as render_err:
+        logger.error(f"Critical template render fallback failed: {render_err}")
+        return f"<h3>Application Error: index.html not found in repository. Ensure it exists in 'templates/index.html'.</h3>", 500
 
 @app.route('/api/health', methods=['GET'])
 def system_health():
@@ -392,7 +419,6 @@ def send_likes_api():
             'message': 'Invalid Free Fire Player UID format. Must be 8-12 digits.'
         }), 400
 
-    # Route based on selected package size
     target_api_url = API_URL_20 if likes_target == 20 else API_URL_50
 
     params = {
