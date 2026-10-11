@@ -458,7 +458,7 @@ def cleanup_expired_sessions():
         return 0
 
 # ==============================================================================
-# SECTION 10: AUDIT TELEMETRY & BAN REPOSITORIES (SAFE QUERIES)
+# SECTION 10: AUDIT TELEMETRY & BAN REPOSITORIES (AUTO-RECOVERY FIX)
 # ==============================================================================
 def log_usage(key, action, uid, region, status, ip, ua):
     """Write an audit entry for actions executed across the system."""
@@ -485,18 +485,31 @@ def get_usage_logs(limit=100):
         return []
 
 def is_ip_banned(ip):
-    """Check if a remote client IP is in the blacklist with zero-fail safety."""
+    """
+    Check if a remote client IP is in the blacklist.
+    Auto-creates the banned_ips table if it does not exist yet to prevent crashes.
+    """
     if not ip:
         return False
     try:
         conn = get_db()
         cur = conn.cursor()
+        # Auto-create table if missing
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS banned_ips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip_address TEXT UNIQUE NOT NULL,
+                reason TEXT,
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
         cur.execute("SELECT 1 FROM banned_ips WHERE ip_address = ?;", (ip,))
         row = cur.fetchone()
         conn.close()
         return row is not None
     except Exception as e:
-        # Table agar start-up me thoda late initialize ho tab bhi crash nahi hoga
+        logger.warning(f"IP ban check bypassed safely: {e}")
         return False
 
 def ban_ip(ip, reason="Automated Security Boundary Violation"):
@@ -505,6 +518,14 @@ def ban_ip(ip, reason="Automated Security Boundary Violation"):
         return False
     try:
         with get_db_cursor(commit=True) as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS banned_ips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip_address TEXT UNIQUE NOT NULL,
+                    reason TEXT,
+                    banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
             cur.execute("INSERT OR IGNORE INTO banned_ips (ip_address, reason) VALUES (?, ?);", (ip, reason))
             logger.warning(f"IP {ip} has been added to the blacklist. Reason: {reason}")
             return True
